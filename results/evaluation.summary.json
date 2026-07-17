@@ -1,0 +1,50 @@
+{
+  "samples": 21,
+  "baseline": 0.5998277103617078,
+  "robust": 0.6187483650587854,
+  "delta": 0.01892065434228806,
+  "by_degradation": [
+    {
+      "degradation": "cafe_noise",
+      "baseline_xvector_similarity": 0.631178617477417,
+      "robust_xvector_similarity": 0.6724199255307516,
+      "delta": 0.041241308053334556
+    },
+    {
+      "degradation": "compression",
+      "baseline_xvector_similarity": 0.5655861099561056,
+      "robust_xvector_similarity": 0.6346630851427714,
+      "delta": 0.06907697518666585
+    },
+    {
+      "degradation": "hvac_noise",
+      "baseline_xvector_similarity": 0.7915212710698446,
+      "robust_xvector_similarity": 0.7611270944277445,
+      "delta": -0.030394176642100017
+    },
+    {
+      "degradation": "pink_noise",
+      "baseline_xvector_similarity": 0.7008184591929117,
+      "robust_xvector_similarity": 0.7049613197644552,
+      "delta": 0.004142860571543376
+    },
+    {
+      "degradation": "reverb_noise",
+      "baseline_xvector_similarity": 0.2665357639392217,
+      "robust_xvector_similarity": 0.2639654154578845,
+      "delta": -0.002570350964864095
+    },
+    {
+      "degradation": "telephone",
+      "baseline_xvector_similarity": 0.577402134736379,
+      "robust_xvector_similarity": 0.593436062335968,
+      "delta": 0.01603392759958903
+    },
+    {
+      "degradation": "white_noise",
+      "baseline_xvector_similarity": 0.6657516161600748,
+      "robust_xvector_similarity": 0.7006656527519226,
+      "delta": 0.03491403659184774
+    }
+  ]
+}
