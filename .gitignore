@@ -4,7 +4,7 @@ __pycache__/
 *.py[cod]
 .env
 data/
-models/
+/models/
 CosyVoice/
 outputs/
 *.pt
