@@ -1,80 +1,130 @@
-"""深度 Transformer 说话人编码器与联合训练的 mel 域 BWE U-Net。"""
+"""Quality-conditioned speaker encoder and mel bandwidth-extension network."""
 from __future__ import annotations
-
-import math
 
 import torch
 from torch import nn
-from torch.nn import functional as functional
-
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, dimension: int, max_length: int = 1024) -> None:
-        super().__init__()
-        position = torch.arange(max_length).unsqueeze(1)
-        divisor = torch.exp(torch.arange(0, dimension, 2) * (-math.log(10000.0) / dimension))
-        encoding = torch.zeros(max_length, dimension)
-        encoding[:, 0::2], encoding[:, 1::2] = torch.sin(position * divisor), torch.cos(position * divisor)
-        self.register_buffer("encoding", encoding[None], persistent=False)
-
-    def forward(self, value: torch.Tensor) -> torch.Tensor:
-        return value + self.encoding[:, :value.size(1)]
+from torch.nn import functional as F
 
 
 class RobustSpeakerEncoder(nn.Module):
-    """6 层 Transformer：mel + 质量 token -> 与 CosyVoice 兼容的 192 维条件。"""
+    """Map an 80-bin log-mel prompt to CosyVoice's 192-D speaker space.
 
-    def __init__(self, n_mels: int = 80, d_model: int = 256, layers: int = 6, heads: int = 4,
-                 feedforward: int = 1024, output_dim: int = 192, dropout: float = 0.1) -> None:
+    ``quality`` is a continuous two-value condition: estimated SNR/30 and
+    bandwidth/8000. Calling it a discrete quality token would be inaccurate.
+    """
+
+    def __init__(
+        self,
+        n_mels: int = 80,
+        embedding_dim: int = 192,
+        model_dim: int = 288,
+        layers: int = 6,
+        heads: int = 6,
+        feedforward_dim: int = 768,
+        dropout: float = 0.1,
+    ) -> None:
         super().__init__()
-        self.n_mels = n_mels
-        self.mel_projection = nn.Linear(n_mels, d_model)
-        self.quality_projection = nn.Sequential(nn.Linear(2, d_model), nn.SiLU(), nn.Linear(d_model, d_model))
-        self.position = PositionalEncoding(d_model)
-        block = nn.TransformerEncoderLayer(d_model, heads, feedforward, dropout=dropout, batch_first=True, norm_first=True)
-        self.transformer = nn.TransformerEncoder(block, layers)
-        self.attention = nn.Sequential(nn.Linear(d_model, d_model // 2), nn.Tanh(), nn.Linear(d_model // 2, 1))
-        self.output = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, d_model), nn.GELU(), nn.Dropout(dropout), nn.Linear(d_model, output_dim))
+        self.input_projection = nn.Sequential(
+            nn.Conv1d(n_mels, model_dim, kernel_size=5, padding=2),
+            nn.GroupNorm(8, model_dim),
+            nn.GELU(),
+        )
+        self.quality_projection = nn.Sequential(nn.Linear(2, model_dim), nn.GELU(), nn.Linear(model_dim, model_dim))
+        block = nn.TransformerEncoderLayer(
+            d_model=model_dim,
+            nhead=heads,
+            dim_feedforward=feedforward_dim,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(block, num_layers=layers, norm=nn.LayerNorm(model_dim))
+        self.attention_pool = nn.Linear(model_dim, 1)
+        self.output_projection = nn.Sequential(nn.LayerNorm(model_dim), nn.Linear(model_dim, embedding_dim))
 
-    def forward(self, mel: torch.Tensor, quality: torch.Tensor, lengths: torch.Tensor | None = None) -> torch.Tensor:
-        if mel.ndim != 3:
-            raise ValueError("mel must have shape (batch, 80, frames)")
-        frames = mel.transpose(1, 2)
-        values = self.position(self.mel_projection(frames) + self.quality_projection(quality).unsqueeze(1))
-        padding_mask = None
-        if lengths is not None:
-            padding_mask = torch.arange(values.size(1), device=values.device)[None] >= lengths[:, None]
-        values = self.transformer(values, src_key_padding_mask=padding_mask)
-        weights = self.attention(values).squeeze(-1)
-        if padding_mask is not None:
-            weights = weights.masked_fill(padding_mask, float("-inf"))
-        weights = weights.softmax(dim=-1)
-        pooled = torch.sum(values * weights.unsqueeze(-1), dim=1)
-        return functional.normalize(self.output(pooled), dim=-1)
+    def forward(self, mel: torch.Tensor, quality: torch.Tensor) -> torch.Tensor:
+        if mel.ndim != 3 or mel.shape[1] != self.input_projection[0].in_channels:
+            raise ValueError(f"mel must have shape [batch, 80, frames], got {tuple(mel.shape)}")
+        if quality.shape != (mel.shape[0], 2):
+            raise ValueError(f"quality must have shape [batch, 2], got {tuple(quality.shape)}")
+        sequence = self.input_projection(mel).transpose(1, 2)
+        sequence = sequence + self.quality_projection(quality.clamp(0.0, 1.0)).unsqueeze(1)
+        sequence = self.transformer(sequence)
+        weights = torch.softmax(self.attention_pool(sequence).squeeze(-1), dim=-1)
+        pooled = torch.sum(sequence * weights.unsqueeze(-1), dim=1)
+        return F.normalize(self.output_projection(pooled), dim=-1)
+
+
+class _ConvBlock(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__()
+        groups = min(8, out_channels)
+        self.layers = nn.Sequential(
+            nn.Conv1d(in_channels, out_channels, kernel_size=5, padding=2),
+            nn.GroupNorm(groups, out_channels),
+            nn.SiLU(),
+            nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, out_channels),
+            nn.SiLU(),
+        )
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        return self.layers(value)
 
 
 class LightweightBWENet(nn.Module):
-    """在低频 mel 条件下预测电话音频丢失的高频 mel 残差。"""
+    """Residual 1-D U-Net operating on log-mel sequences.
 
-    def __init__(self, n_mels: int = 80, channels: int = 192) -> None:
+    It predicts a correction rather than a waveform. Consequently any LSD
+    reported for this module must be labelled *mel-domain LSD*.
+    """
+
+    def __init__(self, n_mels: int = 80, widths: tuple[int, int, int] = (128, 256, 384)) -> None:
         super().__init__()
-        self.enc1 = nn.Sequential(nn.Conv1d(n_mels, channels, 5, padding=2), nn.GroupNorm(8, channels), nn.SiLU())
-        self.enc2 = nn.Sequential(nn.Conv1d(channels, channels * 2, 4, stride=2, padding=1), nn.GroupNorm(8, channels * 2), nn.SiLU())
-        self.enc3 = nn.Sequential(nn.Conv1d(channels * 2, channels * 2, 4, stride=2, padding=1), nn.GroupNorm(8, channels * 2), nn.SiLU())
-        self.middle = nn.Sequential(nn.Conv1d(channels * 2, channels * 2, 3, padding=1), nn.SiLU(), nn.Conv1d(channels * 2, channels * 2, 3, padding=1), nn.SiLU())
-        self.up2 = nn.ConvTranspose1d(channels * 2, channels * 2, 4, stride=2, padding=1)
-        self.dec2 = nn.Sequential(nn.Conv1d(channels * 4, channels * 2, 3, padding=1), nn.GroupNorm(8, channels * 2), nn.SiLU())
-        self.up1 = nn.ConvTranspose1d(channels * 2, channels, 4, stride=2, padding=1)
-        self.dec1 = nn.Sequential(nn.Conv1d(channels * 2, channels, 3, padding=1), nn.GroupNorm(8, channels), nn.SiLU(), nn.Conv1d(channels, n_mels, 3, padding=1))
+        first, second, third = widths
+        self.encoder1 = _ConvBlock(n_mels, first)
+        self.encoder2 = _ConvBlock(first, second)
+        self.encoder3 = _ConvBlock(second, third)
+        self.bottleneck = _ConvBlock(third, third)
+        self.decoder2 = _ConvBlock(third + second, second)
+        self.decoder1 = _ConvBlock(second + first, first)
+        self.output = nn.Conv1d(first, n_mels, kernel_size=1)
 
     @staticmethod
-    def _match(value: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
-        return value[..., :reference.size(-1)] if value.size(-1) >= reference.size(-1) else functional.pad(value, (0, reference.size(-1) - value.size(-1)))
+    def _resize(value: torch.Tensor, frames: int) -> torch.Tensor:
+        return F.interpolate(value, size=frames, mode="linear", align_corners=False)
 
-    def forward(self, telephone_mel: torch.Tensor) -> torch.Tensor:
-        first = self.enc1(telephone_mel); second = self.enc2(first); third = self.enc3(second)
-        middle = self.middle(third); up2 = self._match(self.up2(middle), second)
-        decoded2 = self.dec2(torch.cat((up2, second), dim=1)); up1 = self._match(self.up1(decoded2), first)
-        residual = self.dec1(torch.cat((up1, first), dim=1))
-        output = telephone_mel.clone(); output[:, output.size(1) // 2:] += residual[:, residual.size(1) // 2:]
-        return output
+    def forward(self, mel: torch.Tensor) -> torch.Tensor:
+        if mel.ndim != 3:
+            raise ValueError(f"mel must have shape [batch, mels, frames], got {tuple(mel.shape)}")
+        first = self.encoder1(mel)
+        second = self.encoder2(F.avg_pool1d(first, kernel_size=2, ceil_mode=True))
+        third = self.encoder3(F.avg_pool1d(second, kernel_size=2, ceil_mode=True))
+        latent = self.bottleneck(third)
+        decoded2 = self.decoder2(torch.cat([self._resize(latent, second.shape[-1]), second], dim=1))
+        decoded1 = self.decoder1(torch.cat([self._resize(decoded2, first.shape[-1]), first], dim=1))
+        return mel + self.output(decoded1)
+
+
+def soft_bwe_gate(
+    bandwidth_normalized: torch.Tensor,
+    threshold_hz: float = 4200.0,
+    temperature_hz: float = 400.0,
+) -> torch.Tensor:
+    """Return a smooth BWE mixture weight from a normalized bandwidth estimate."""
+    bandwidth_hz = bandwidth_normalized.clamp(0.0, 1.0) * 8000.0
+    return torch.sigmoid((threshold_hz - bandwidth_hz) / temperature_hz)
+
+
+def apply_soft_bwe(
+    degraded_mel: torch.Tensor,
+    predicted_mel: torch.Tensor,
+    quality: torch.Tensor,
+    threshold_hz: float = 4200.0,
+    temperature_hz: float = 400.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Blend original and BWE mel continuously, avoiding a brittle boolean route."""
+    gate = soft_bwe_gate(quality[:, 1], threshold_hz, temperature_hz)
+    enhanced = torch.lerp(degraded_mel, predicted_mel, gate[:, None, None])
+    return enhanced, gate

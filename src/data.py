@@ -15,7 +15,7 @@ class OnlineRobustSpeakerDataset(Dataset):
     def __init__(self, manifest: Path, teacher_cache: Path, speaker_subset: set[str], segment_seconds: float = 4.0, seed: int = 42) -> None:
         all_speakers: dict[str, list[dict]] = json.loads(manifest.read_text(encoding="utf-8"))
         self.items = [(speaker, item) for speaker, entries in all_speakers.items() if speaker in speaker_subset for item in entries]
-        self.teacher = torch.load(teacher_cache, map_location="cpu"); self.segment_samples = int(16000 * segment_seconds); self.seed = seed; self.epoch = 0
+        self.teacher = torch.load(teacher_cache, map_location="cpu", weights_only=True); self.segment_samples = int(16000 * segment_seconds); self.seed = seed; self.epoch = 0
         self.mel = torchaudio.transforms.MelSpectrogram(16000, n_fft=512, win_length=512, hop_length=256, n_mels=80)
         self.speaker_indices: dict[str, list[int]] = {}
         for index, (speaker, _) in enumerate(self.items): self.speaker_indices.setdefault(speaker, []).append(index)

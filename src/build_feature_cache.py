@@ -11,14 +11,19 @@ import torch
 import torchaudio
 
 from src.degradation import DEGRADATION_TYPES, simulate
+from src.degradation_v3 import DegradationAssets, FORMAL_DEGRADATION_TYPES, FormalDegradationEngine
 
 FRAMES, MELS, SAMPLES = 251, 80, 64000
 _MEL = None
+_ENGINE = None
+_KINDS = DEGRADATION_TYPES
 
 
-def _initialise_worker() -> None:
-    global _MEL
+def _initialise_worker(asset_manifest: str | None = None, formal: bool = False) -> None:
+    global _MEL, _ENGINE, _KINDS
     torch.set_num_threads(1); _MEL = torchaudio.transforms.MelSpectrogram(16000, n_fft=512, win_length=512, hop_length=256, n_mels=MELS)
+    _ENGINE = FormalDegradationEngine(DegradationAssets.from_manifest(Path(asset_manifest) if asset_manifest else None, "train"), allow_synthetic_fallback=not formal) if formal else None
+    _KINDS = FORMAL_DEGRADATION_TYPES if formal else DEGRADATION_TYPES
 
 
 def _crop(path: str, seed: int) -> torch.Tensor:
@@ -33,28 +38,35 @@ def _as_mel(waveform: torch.Tensor) -> np.ndarray:
     return mel[:, :FRAMES].numpy().astype(np.float16, copy=False)
 
 
-def _process(item: tuple[int, str, str]) -> tuple[int, str, np.ndarray, list[np.ndarray], np.ndarray, np.ndarray]:
-    index, speaker, path = item; clean = _crop(path, index + 42); degraded_mels, qualities, telephone = [], [], []
-    for kind_index, kind in enumerate(DEGRADATION_TYPES):
-        degraded, metadata = simulate(clean, kind, (index + kind_index) % 3, 100_000 + index * 17 + kind_index)
+def _process(item: tuple[int, str, str]) -> tuple[int, str, np.ndarray, list[np.ndarray], np.ndarray, np.ndarray, list[dict]]:
+    index, speaker, path = item; clean = _crop(path, index + 42); degraded_mels, qualities, telephone, audit = [], [], [], []
+    for kind_index, kind in enumerate(_KINDS):
+        severity, seed = (index + kind_index) % 3, 100_000 + index * 17 + kind_index
+        degraded, metadata = _ENGINE.apply(clean, kind, severity, seed) if _ENGINE else simulate(clean, kind, severity, seed)
         degraded_mels.append(_as_mel(degraded)); qualities.append([float(metadata["snr_db"]) / 30, float(metadata["bandwidth_hz"]) / 8000]); telephone.append(bool(metadata["telephone"]))
-    return index, speaker, _as_mel(clean), degraded_mels, np.asarray(qualities, np.float32), np.asarray(telephone, bool)
+        audit.append(dict(metadata) | {"source_index": index, "speaker": speaker, "wav_path": path, "kind": kind, "severity": severity, "seed": seed})
+    return index, speaker, _as_mel(clean), degraded_mels, np.asarray(qualities, np.float32), np.asarray(telephone, bool), audit
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(); parser.add_argument("--manifest", type=Path, required=True); parser.add_argument("--output", type=Path, required=True); parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--degradation-assets", type=Path)
+    parser.add_argument("--formal-real-degradations", action="store_true")
     args = parser.parse_args(); speakers: dict[str, list[dict]] = json.loads(args.manifest.read_text(encoding="utf-8")); items = [(index, speaker, row["wav_path"]) for index, (speaker, row) in enumerate((entry for speaker, rows in speakers.items() for entry in ((speaker, row) for row in rows)))]
-    args.output.mkdir(parents=True, exist_ok=True); count, variants = len(items), len(DEGRADATION_TYPES)
+    if args.formal_real_degradations and not args.degradation_assets:
+        raise SystemExit("--formal-real-degradations requires --degradation-assets")
+    args.output.mkdir(parents=True, exist_ok=True); count, variants = len(items), len(FORMAL_DEGRADATION_TYPES if args.formal_real_degradations else DEGRADATION_TYPES)
     clean = np.memmap(args.output / "clean_mels.f16", dtype=np.float16, mode="w+", shape=(count, MELS, FRAMES))
     degraded = np.memmap(args.output / "degraded_mels.f16", dtype=np.float16, mode="w+", shape=(count * variants, MELS, FRAMES))
     quality = np.memmap(args.output / "quality.f32", dtype=np.float32, mode="w+", shape=(count * variants, 2)); telephone = np.memmap(args.output / "telephone.bool", dtype=np.bool_, mode="w+", shape=(count * variants,))
-    speaker_rows = [None] * count
-    with multiprocessing.Pool(args.workers, initializer=_initialise_worker) as pool:
+    speaker_rows = [None] * count; audit_rows: list[dict | None] = [None] * (count * variants)
+    with multiprocessing.Pool(args.workers, initializer=_initialise_worker, initargs=(str(args.degradation_assets) if args.degradation_assets else None, args.formal_real_degradations)) as pool:
         for completed, result in enumerate(pool.imap_unordered(_process, items), 1):
-            index, speaker, clean_mel, variants_mel, qualities, flags = result; clean[index] = clean_mel; start = index * variants; degraded[start:start + variants] = np.stack(variants_mel); quality[start:start + variants] = qualities; telephone[start:start + variants] = flags; speaker_rows[index] = speaker
+            index, speaker, clean_mel, variants_mel, qualities, flags, audit = result; clean[index] = clean_mel; start = index * variants; degraded[start:start + variants] = np.stack(variants_mel); quality[start:start + variants] = qualities; telephone[start:start + variants] = flags; speaker_rows[index] = speaker; audit_rows[start:start + variants] = audit
             if completed % 100 == 0 or completed == count: print(f"cached {completed}/{count} clean utterances ({completed * variants}/{count * variants} degradations)", flush=True)
     for array in (clean, degraded, quality, telephone): array.flush()
-    (args.output / "metadata.json").write_text(json.dumps({"count": count, "speakers": speaker_rows, "variants": variants, "frames": FRAMES, "mels": MELS}), encoding="utf-8")
+    (args.output / "metadata.json").write_text(json.dumps({"schema_version": 3, "count": count, "speakers": speaker_rows, "variants": variants, "frames": FRAMES, "mels": MELS, "degradation_backend": "real_assets_and_ffmpeg" if args.formal_real_degradations else "synthetic_v2"}), encoding="utf-8")
+    (args.output / "degradation_metadata.jsonl").write_text("\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in audit_rows) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__": main()

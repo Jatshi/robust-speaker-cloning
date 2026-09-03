@@ -17,11 +17,16 @@ class CosyVoiceConditionedSynthesizer:
 
     @torch.inference_mode()
     def synthesize_with_condition(self, text: str, prompt_text: str, prompt_wav: Path, condition: torch.Tensor, output: Path) -> None:
-        model_input = self.model.frontend.frontend_zero_shot(text, prompt_text, str(prompt_wav), self.model.sample_rate, "")
         condition = torch.nn.functional.normalize(condition.reshape(1, 192), dim=-1).to(self.model.frontend.device)
-        # V2 的蒸馏目标是 CampPlus 空间，因此这两项正是实际 CosyVoice 消费的条件。
-        model_input["llm_embedding"] = condition; model_input["flow_embedding"] = condition
-        pieces = [item["tts_speech"].squeeze().cpu() for item in self.model.model.tts(**model_input)]
+        normalized_prompt = self.model.frontend.text_normalize(prompt_text, split=False, text_frontend=False)
+        normalized_texts = self.model.frontend.text_normalize(text, split=True, text_frontend=False)
+        pieces = []
+        for normalized_text in normalized_texts:
+            model_input = self.model.frontend.frontend_zero_shot(normalized_text, normalized_prompt, str(prompt_wav), self.model.sample_rate, "")
+            # The distillation target is CampPlus space; these are the two
+            # fields consumed by the official CosyVoice2 model interface.
+            model_input["llm_embedding"] = condition; model_input["flow_embedding"] = condition
+            pieces.extend(item["tts_speech"].squeeze().cpu() for item in self.model.model.tts(**model_input, stream=False, speed=1.0))
         if not pieces: raise RuntimeError("CosyVoice did not return a waveform")
         output.parent.mkdir(parents=True, exist_ok=True); soundfile.write(output, torch.cat(pieces).numpy(), self.model.sample_rate)
 

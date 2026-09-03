@@ -37,7 +37,7 @@ def main() -> None:
     parser.add_argument("--model-root", type=Path, required=True); parser.add_argument("--cosyvoice-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True); parser.add_argument("--samples-per-type", type=int, default=3)
     args = parser.parse_args(); device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint = torch.load(args.checkpoint, map_location=device); encoder = RobustSpeakerEncoder().to(device).eval(); bwe = LightweightBWENet().to(device).eval()
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=True); encoder = RobustSpeakerEncoder().to(device).eval(); bwe = LightweightBWENet().to(device).eval()
     encoder.load_state_dict(checkpoint["encoder"]); bwe.load_state_dict(checkpoint["bwe"])
     speakers: dict[str, list[dict]] = json.loads(args.manifest.read_text(encoding="utf-8")); samples = [item for items in speakers.values() for item in items][:len(DEGRADATION_TYPES) * args.samples_per_type]
     synthesizer = CosyVoiceConditionedSynthesizer(args.model_root, args.cosyvoice_root)

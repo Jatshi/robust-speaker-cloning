@@ -13,7 +13,7 @@ class CachedRobustDataset(Dataset):
     def __init__(self, cache_dir: Path, teacher_cache: Path, manifest: Path, selected_speakers: set[str]) -> None:
         meta = json.loads((cache_dir / "metadata.json").read_text()); self.count, self.variants, self.frames, self.mels = meta["count"], meta["variants"], meta["frames"], meta["mels"]
         self.clean = np.memmap(cache_dir / "clean_mels.f16", np.float16, "r", shape=(self.count, self.mels, self.frames)); self.degraded = np.memmap(cache_dir / "degraded_mels.f16", np.float16, "r", shape=(self.count * self.variants, self.mels, self.frames)); self.quality = np.memmap(cache_dir / "quality.f32", np.float32, "r", shape=(self.count * self.variants, 2)); self.telephone = np.memmap(cache_dir / "telephone.bool", np.bool_, "r", shape=(self.count * self.variants,))
-        manifest_rows: dict[str, list[dict]] = json.loads(manifest.read_text()); paths = [item["wav_path"] for speaker, rows in manifest_rows.items() for item in rows]; teacher = torch.load(teacher_cache, map_location="cpu")
+        manifest_rows: dict[str, list[dict]] = json.loads(manifest.read_text()); paths = [item["wav_path"] for speaker, rows in manifest_rows.items() for item in rows]; teacher = torch.load(teacher_cache, map_location="cpu", weights_only=True)
         self.sources = [index for index, speaker in enumerate(meta["speakers"]) if speaker in selected_speakers]; self.teachers = teacher; self.paths = paths; self.source_speakers = meta["speakers"]; self.speaker_sources: dict[str, list[int]] = {}
         for index in self.sources: self.speaker_sources.setdefault(self.source_speakers[index], []).append(index)
 

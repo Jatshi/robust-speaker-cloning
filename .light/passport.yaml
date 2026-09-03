@@ -1,0 +1,18 @@
+project: robust-speaker-cloning
+updated: 2026-09-03
+objective: "通过组件 Oracle 定位 CosyVoice 退化瓶颈，并把失败的 encoder replacement 改造成带安全旁路的窄带 prompt-feature 恢复工程"
+current_stage: v4_confirmation_complete
+stages:
+  - {name: recover_core_source, status: complete, evidence: src/models}
+  - {name: trustworthy_protocol, status: complete, evidence: src/evaluate_v3.py}
+  - {name: real_degradation_preparation, status: complete, evidence: src/degradation_v3.py}
+  - {name: autodl_orchestration, status: complete, evidence: scripts/run_v3.sh}
+  - {name: formal_gpu_experiment, status: complete, evidence: "outputs/prompt-feature-v4/formal"}
+  - {name: component_oracle, status: complete, evidence: "outputs/v4/component-diagnostic"}
+  - {name: prompt_feature_training, status: complete, evidence: "outputs/prompt-feature-v4/checkpoints/best.pt"}
+  - {name: fresh_seed_confirmation, status: complete, evidence: "outputs/prompt-feature-v4/confirmation"}
+quality_gates:
+  unit_tests: "24 passed"
+  cpu_pipeline_smoke: passed
+  ruff_fatal_rules: passed
+claims_policy: "Only claim narrowband routed confirmation results; preserve the failed V3 and failed all-degradation V4 results"

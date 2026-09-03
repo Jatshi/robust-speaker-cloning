@@ -1,0 +1,10 @@
+# Immutable source revisions used by V3 preparation (verified 2026-08-24).
+COSYVOICE_REPOSITORY=https://github.com/FunAudioLLM/CosyVoice.git
+COSYVOICE_COMMIT=074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc
+SPEECHMOS_REPOSITORY=https://github.com/tarepan/SpeechMOS.git
+SPEECHMOS_TAG=v1.2.0
+SPEECHMOS_COMMIT=ed25eacbfa42b99156c36ebec67a733b5dbb9b79
+COSYVOICE_MODEL=iic/CosyVoice2-0.5B
+COSYVOICE_MODEL_REVISION=6e3aa301f53582fa2de88625f89a29cb80d0fba1
+ECAPA_MODEL=speechbrain/spkrec-ecapa-voxceleb
+ENHANCEMENT_BASELINE=speechbrain/metricgan-plus-voicebank

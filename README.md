@@ -1,131 +1,108 @@
-# Robust Speaker Cloning
+# Robust Speaker Cloning V4
 
 <p align="center">
-  <strong>Robust reference conditioning for zero-shot CosyVoice cloning under noisy, reverberant and telephone prompts.</strong><br />
-  A compact Transformer + bandwidth-extension front end, evaluated through real end-to-end synthesis.
+  <strong>Evidence-first narrowband prompt restoration for zero-shot CosyVoice cloning.</strong><br>
+  Frozen CAMPPlus · frozen speech tokens · exact acoustic-prompt features · no-op safety router
 </p>
 
 <p align="center">
-  <a href="https://huggingface.co/jatshi/robust-speaker-cloning"><img src="https://img.shields.io/badge/🤗%20Model-Robust%20Speaker%20Cloning-ffcc4d?style=for-the-badge" alt="Hugging Face model" /></a>
-  <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/Backbone-CosyVoice2--0.5B-00b894?style=for-the-badge" alt="CosyVoice" />
-  <img src="https://img.shields.io/badge/License-MIT-1f6feb?style=for-the-badge" alt="MIT license" />
+  <a href="https://huggingface.co/jatshi/robust-speaker-cloning"><img src="https://img.shields.io/badge/🤗%20Model-V2%20public%20weights-ffcc4d?style=for-the-badge" alt="Hugging Face model"></a>
+  <img src="https://img.shields.io/badge/V4-confirmed%20105%20pairs-00b894?style=for-the-badge" alt="V4 confirmation">
+  <img src="https://img.shields.io/badge/License-MIT-1f6feb?style=for-the-badge" alt="MIT license">
 </p>
 
-![Robust Speaker Cloning interactive demo](assets/readme/sounddet-demo.gif)
+![Interactive demo](assets/readme/sounddet-demo.gif)
 
-> The animation follows the local demo’s actual pipeline: degraded reference → quality-aware robust condition → real CosyVoice synthesis. The displayed aggregate metric is the measured ECAPA result from this release.
+> **Evidence status (2026-09-03):** V4 has a complete AutoDL chain and a fresh-seed 105-pair confirmation run. The public Hugging Face link still identifies the earlier public weight release; do not describe it as the V4 checkpoint until the model card and weight are updated.
 
-## What it solves
+## Outcome
 
-Zero-shot TTS is only as reliable as its reference condition. A narrow-band phone prompt, background noise or reverberation can distort that condition before the TTS model ever starts decoding. This project freezes CosyVoice2-0.5B and learns a small, compatible front end that turns degraded reference mel features into a robust 192-dimensional speaker condition.
+The original idea—training a small encoder from scratch to replace CAMPPlus—failed decisively. V3 reduced mean ECAPA speaker similarity by `-0.21257` on 105 paired generations. V4 instead freezes every mature CosyVoice component, diagnoses the actual conditioning bottleneck, restores only the 80-D acoustic prompt feature, and applies that restorer only to detected narrowband inputs.
 
-The project includes a telephone-only mel-domain BWE route, quality-adaptive Transformer conditioning, contrastive identity learning and distillation to CosyVoice’s frozen CampPlus reference interface.
+On a new-random-seed confirmation protocol with 7 degradation families × 15 cases:
 
-## End-to-end result
+| Metric | Official degraded baseline | Routed V4 | Delta |
+|---|---:|---:|---:|
+| ECAPA cosine to independent clean reference | 0.61677 | 0.62233 | **+0.00556** |
+| UTMOS22 strong | 2.63001 | 2.65358 | **+0.02357** |
 
-| Metric, 21 paired generations | Baseline | Robust V2 | Delta |
-| --- | ---: | ---: | ---: |
-| ECAPA x-vector similarity to clean reference | 0.5998 | 0.6187 | **+0.0189** |
+The ECAPA 95% bootstrap CI is `[+0.00174,+0.00998]`; paired two-sided Wilcoxon `p=0.01759`. The router changed 15/105 cases—14 telephone and one low-high-band-energy Opus—and left the other 90 cases numerically on the official path.
 
-The average result is positive. However, the small evaluation contains negative deltas for HVAC noise and reverb, so this release does **not** claim universal improvement. See [`results/evaluation.csv`](results/evaluation.csv) for every paired measurement.
+This is evidence for a narrowband-safe route on one corpus and one held-out speaker pool, not a universal robustness claim. See the [full experiment report](docs/AUTODL_V4_PROMPT_FEATURE_REPORT_2026-09-03.md) and [claim–evidence table](claim_evidence_table.md).
 
-## Architecture
+## How the direction was chosen
+
+A controlled clean-component Oracle isolated each CosyVoice conditioning branch:
+
+| Clean component substituted | Mean ECAPA delta | Wins | 95% CI |
+|---|---:|---:|---:|
+| CAMPPlus embedding only | +0.00275 | 5/7 | [-0.01920,+0.02033] |
+| speech token only | -0.01905 | 1/7 | [-0.03629,-0.00150] |
+| acoustic prompt feature only | **+0.03534** | **7/7** | **[+0.01150,+0.06446]** |
+
+This falsified the assumption that CAMPPlus was the main bottleneck. A second diagnostic also showed that raw and unit-normalised CAMPPlus reinjection produce identical waveforms because CosyVoice normalises the embedding downstream.
+
+## V4 architecture
 
 ```mermaid
 flowchart LR
-    A[Degraded reference WAV] --> B[80-bin log-mel]
-    B --> C{Telephone bandwidth?}
-    C -->|yes| D[Mel U-Net BWE]
-    C -->|no| E[Original mel]
-    D --> F[6-layer quality-aware Transformer]
-    E --> F
-    Q[SNR + bandwidth quality token] --> F
-    F --> G[192D robust speaker condition]
-    G --> H[CosyVoice2 zero-shot condition injection]
-    H --> I[Synthesized speech]
-    I --> J[ECAPA paired evaluation]
+    A[Degraded prompt audio] --> B[CosyVoice exact 80-D Matcha feature]
+    A --> C[High-band energy ratio]
+    C -->|not narrowband| D[alpha = 0: exact official path]
+    C -->|narrowband| E[161k residual temporal restorer]
+    B --> E
+    E --> F[Restored prompt_speech_feat]
+    D --> G[Frozen CosyVoice Flow / vocoder]
+    F --> G
+    A --> H[Official CAMPPlus + speech tokenizer]
+    H --> G
 ```
 
-## Feature matrix
+The restorer has eight dilated depthwise temporal blocks and a zero-initialised output head:
 
-| Capability | Included |
-| --- | :---: |
-| 400-speaker AISHELL construction | ✓ |
-| Seven deterministic degradation families | ✓ |
-| 6-layer Transformer speaker encoder | ✓ |
-| Telephone BWE U-Net | ✓ |
-| InfoNCE + interface distillation + BWE joint loss | ✓ |
-| Actual CosyVoice condition injection | ✓ |
-| ECAPA x-vector paired evaluation | ✓ |
-| Local Gradio demo | ✓ |
+`feature_out = feature_in + alpha × quality_gate × residual`
 
-## Quick start
+`alpha=0` is a strict no-op. CAMPPlus, speech tokenizer, LLM, Flow and vocoder remain frozen.
+
+## Data and evaluation
+
+- AISHELL-1: 400 train/validation speakers, 2,000 clean prompts, 14,000 paired feature examples.
+- Degradations: MUSAN babble/music/real noise, measured RIR, actual MP3/Opus round trips and telephone narrowband.
+- Speaker-disjoint train/validation; final evaluation uses 40 held-out speakers.
+- Prompt utterance, clean identity reference and synthesis text are separated.
+- Paired synthesis seeds, per-sample CSV, bootstrap CI, Wilcoxon test and Holm-corrected subgroup statistics.
+
+The first 105-case run with restoration forced on every degradation was negative (`-0.00288` ECAPA, `-0.03372` UTMOS). That result remains documented. It motivated the selection-only narrowband router; a new-seed confirmation was then run without changing its threshold.
+
+## Main entry points
+
+| Purpose | File |
+|---|---|
+| Exact paired feature cache | `src/build_prompt_feature_cache.py` |
+| 161k prompt restorer | `src/models/prompt_feature_restorer.py` |
+| Restoration objective | `src/prompt_feature_loss.py` |
+| Training | `src/train_prompt_feature_restorer.py` |
+| End-to-end routed evaluation | `src/evaluate_prompt_feature_v4.py` |
+| Selection-only router locking | `src/select_prompt_feature_router.py` |
+| Component Oracle | `src/diagnose_v4_components.py` |
+| Resumable pipeline | `scripts/run_prompt_feature_v4.sh` |
+
+## Reproduce
+
+Prepare the pinned CosyVoice runtime and public datasets using the existing AutoDL scripts, then:
 
 ```bash
-git clone https://github.com/Jatshi/robust-speaker-cloning.git
-cd robust-speaker-cloning
-python -m venv .venv
-.venv/Scripts/activate  # Linux/macOS: source .venv/bin/activate
-pip install -r requirements.txt
+bash scripts/run_prompt_feature_v4.sh cache
+bash scripts/run_prompt_feature_v4.sh train
+bash scripts/run_prompt_feature_v4.sh select
 ```
 
-Download `best.pt` from [Hugging Face](https://huggingface.co/jatshi/robust-speaker-cloning) into `outputs/checkpoints/`. Obtain CosyVoice2-0.5B and the upstream CosyVoice repository according to their licenses, then make them available as `models/CosyVoice2-0.5B/` and `CosyVoice/`.
+Lock the route on selection data and run evaluation only if the gate passes. The exact protocol and limitation rules are in [the V4 plan](refine-logs/EXPERIMENT_PLAN_20260903_PROMPT_FEATURE.md) and [run gate](docs/V4_IMPLEMENTATION_AND_RUN_GATE.md).
 
-```bash
-python app.py
-# Local demo listens on http://127.0.0.1:7861
-```
+## Evidence contract
 
-For a full training run, prepare AISHELL and run:
+Every performance statement must point to an immutable checkpoint, per-sample rows, deterministic summary, exact evaluator version and visible negative subgroup results. Oracle and selection results are diagnostic evidence; they are not test-set claims. The confirmation run uses new corruption instances but shares the same 40 held-out speakers with the earlier test, so cross-corpus validation remains future work.
 
-```bash
-export PYTHONPATH=$PWD
-bash scripts/run_v2.sh
-```
+## Third-party boundaries
 
-## Model files
-
-Large assets are hosted in [jatshi/robust-speaker-cloning](https://huggingface.co/jatshi/robust-speaker-cloning).
-
-| Artifact | Purpose |
-| --- | --- |
-| `best.pt` | Best validation V2 Transformer + BWE checkpoint. |
-| `last.pt` | Final epoch checkpoint for continuation or comparison. |
-| `robust-speaker-cloning-v2.tar.gz` | Complete reproducibility archive with generated audio and evaluation output. |
-| `evaluation.csv` | 21 baseline/robust paired ECAPA measurements. |
-
-## Training recipe
-
-- AISHELL: 400 speakers, up to 15 clean utterances each, 6,000 source utterances.
-- Training coverage: 7 degradations per utterance, 42,000 logical samples.
-- Cache: 80×251 float16 mel features, avoiding online augmentation stalls without reducing coverage.
-- Optimizer: AdamW, cosine learning-rate schedule, FP16 AMP, gradient clipping.
-- Formal run: 20 epochs, batch size 16, 47,240 optimization steps.
-- Model sizes: 4.97M-parameter encoder and 3.89M-parameter BWE.
-
-## Edge AI & inference
-
-The learned front end has under 9M parameters and operates on mel features, so it is much lighter than retraining the 0.5B TTS backbone. In deployment, retain the upstream CosyVoice runtime, load `best.pt`, estimate quality from the reference signal, apply BWE only to narrow-band prompts, then inject the 192D condition. The release’s `app.py` implements this path.
-
-## Repository layout
-
-```text
-├── app.py                     # Gradio reference-to-speech demo
-├── assets/readme/             # README demo animation
-├── results/                   # Small, versioned evaluation summaries
-├── scripts/run_v2.sh          # End-to-end training entry point
-├── src/                       # Data, model, training, inference and evaluation
-└── tests/                     # Shape, loss and degradation tests
-```
-
-## Git policy
-
-- Source, tests, compact result tables and GIFs are tracked in Git.
-- Checkpoints, mel caches, generated audio and archives live on Hugging Face.
-- No credentials, user speech data or handover/interview documents are published.
-- The repository uses an MIT code license; CosyVoice, CampPlus, ECAPA and AISHELL have independent upstream terms.
-
-## Citation
-
-Please cite the upstream [CosyVoice](https://github.com/FunAudioLLM/CosyVoice), [SpeechBrain](https://speechbrain.github.io/) and AISHELL-1 resources when using this work. A project-specific paper citation will be added when available.
+Project code is MIT licensed. CosyVoice, AISHELL-1, MUSAN, RIRS_NOISES, SpeechBrain and UTMOS retain their own licences and terms. Dataset audio, external checkpoints, generated speech and user prompts are not committed to Git.
